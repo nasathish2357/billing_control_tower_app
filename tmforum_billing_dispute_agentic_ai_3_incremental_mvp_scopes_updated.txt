@@ -1,0 +1,1613 @@
+Updated Incremental MVP Roadmap: TM Forum Catalyst Telecom Billing Dispute Agentic AI Backend
+===========================================================================================
+
+Purpose
+-------
+
+This document updates the 3-phase incremental MVP roadmap based on technical implementation feedback.
+
+The roadmap still splits the original full backend design into 3 incremental MVP scopes, but it corrects several important implementation risks around LangGraph, LangChain, KG timing, LLM provider strategy, streaming chat, and human-in-the-loop state resumption.
+
+Key updates from prior roadmap:
+
+- Removed the restriction to use a LangChain agent factory API.
+- Removed Azure OpenAI switching requirement.
+- Kept only Google Vertex AI Gemini as the LLM provider.
+- Added streamable chat API requirement using Server-Sent Events, SSE.
+- Corrected LangGraph architecture to avoid AgentExecutor nested loops.
+- Moved NetworkX/kglab KG out of MVP 1 and into MVP 2/MVP 3.
+- Added shallow tool schema requirement for Gemini compatibility.
+- Added explicit LangGraph checkpointer and interrupt/resume handling for human approval flows.
+
+Non-negotiables across all MVPs:
+
+- FastAPI backend.
+- PostgreSQL persistence.
+- LangGraph orchestration using StateGraph.
+- Google Vertex AI Gemini as the only LLM provider.
+- LangChain-compatible chat model and tool binding where useful.
+- Use bind_tools-style tool binding, not AgentExecutor or hidden agent loops inside graph nodes.
+- Owner-layer orchestration boundaries.
+- Audit trace for important actions.
+- TMF-inspired mock APIs.
+- Streamable chat API for demo UX.
+- 10 use cases remain visible from MVP 1 onward.
+- Architecture rule remains: Write-local, read-federated, orchestrate-through-owner.
+
+
+Critical Technical Corrections
+------------------------------
+
+1. LangGraph owns the agentic loop
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Do not use LangChain AgentExecutor or hidden prebuilt agent loops as a mandatory pattern inside LangGraph nodes.
+
+Correct pattern:
+
+- LangGraph StateGraph owns orchestration.
+- LLM nodes call Gemini with bound tools when reasoning/tool selection is needed.
+- Tool execution is routed through explicit LangGraph tool nodes or deterministic service nodes.
+- Graph state is visible, inspectable, checkpointed, and resumable.
+
+Avoid:
+
+- Hidden while loops inside AgentExecutor.
+- Nested agent loops inside LangGraph nodes.
+- Unbounded recursive tool calling.
+- Large all-powerful agents with unrestricted tools.
+
+Recommended pattern:
+
+LLM node:
+
+- Receives graph state.
+- Produces response or tool call request.
+- Uses shallow, strictly typed tool schemas.
+
+Tool node:
+
+- Executes approved tool/service.
+- Writes result back to graph state.
+- Emits audit event if required.
+
+Router node:
+
+- Decides next node based on state, policy, and tool results.
+
+
+2. Gemini-only LLM provider
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The MVP roadmap now uses only Google Vertex AI Gemini.
+
+Environment variable:
+
+LLM_PROVIDER=vertexai_gemini
+
+Provider responsibilities:
+
+- Read Vertex AI project, location, and model configuration.
+- Return configured Gemini chat model.
+- Return configured Gemini-compatible embedding model if used.
+- Fail fast with a clear error if required config is missing.
+
+Suggested files:
+
+app/llm/provider.py
+app/llm/gemini_provider.py
+
+Remove Azure OpenAI requirements from implementation scope.
+
+
+3. Gemini-compatible shallow tool schemas
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Tool schemas must be shallow and strictly typed.
+
+Do not expose deeply nested TMF payloads directly as tool schemas.
+
+Rules:
+
+- Tool input schemas should be small Pydantic models.
+- Prefer IDs and simple filters over full nested objects.
+- Return complex TMF-style data from tools as controlled JSON payloads, not as deeply nested tool input schemas.
+- Avoid recursive schemas.
+- Avoid highly polymorphic unions.
+- Avoid huge optional field sets.
+- Avoid passing full TMF Swagger-style objects into LLM tool definitions.
+
+Good tool input example:
+
+{
+  "billing_account_id": "BA-100001",
+  "bill_id": "BILL-202604"
+}
+
+Bad tool input example:
+
+- Full TMF CustomerBill object with nested relatedParty, relatedEntity, billItem, product, taxItem, characteristic, adjustment, payment, and recursively nested references.
+
+Tool design principle:
+
+The LLM selects intent and calls small tools. Backend services retrieve and process complex telecom payloads internally.
+
+
+4. Streamable chat API
+~~~~~~~~~~~~~~~~~~~~~~
+
+The chat API must support streaming for demo quality and latency handling.
+
+Primary chat endpoint:
+
+POST /api/v1/chat/stream
+
+Recommended transport:
+
+- Server-Sent Events, SSE.
+
+The stream should emit events such as:
+
+- conversation_started
+- intent_detected
+- tool_started
+- tool_completed
+- evidence_loaded
+- token
+- remediation_started
+- remediation_completed
+- escalation_created
+- audit_written
+- final
+- error
+
+Optional non-streaming endpoint may remain for automated tests:
+
+POST /api/v1/chat
+
+But the demo-facing endpoint should be /api/v1/chat/stream.
+
+
+5. KG timing correction
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Do not implement NetworkX/kglab in MVP 1.
+
+In MVP 1, use PostgreSQL relational queries and JSONB payloads for lightweight context reasoning.
+
+For example:
+
+Customer -> BillingAccount -> Bill -> BillLineItem -> UsageRecord
+
+This can be handled using SQL joins and structured JSONB evidence without maintaining a separate in-memory graph.
+
+Introduce NetworkX/kglab in MVP 2 or MVP 3 after the data model and flow behavior are stable.
+
+
+6. Human-in-the-loop resumption with LangGraph checkpointer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Human approval flows must explicitly use LangGraph checkpointing.
+
+MVP 2 and MVP 3 approval flows must:
+
+- Run graphs with a stable thread_id.
+- Use PostgreSQL checkpointer, for example PostgresSaver.
+- Interrupt before or after high-risk action nodes.
+- Persist graph state before returning pending approval.
+- Resume graph execution using the same thread_id after approval/rejection.
+
+High-level flow:
+
+1. Graph reaches high-risk action.
+2. Policy node marks approval_required=true.
+3. Graph interrupts and checkpoint is saved.
+4. API returns approval_id and thread_id.
+5. Human approves or rejects.
+6. Resume API reloads graph state using thread_id.
+7. Graph continues to execute or gracefully closes as rejected.
+
+Do not keep approval state only in memory.
+Do not block a web request waiting for human approval.
+
+
+Overall Incremental Strategy
+----------------------------
+
+MVP 1: Foundation and first executable flows
+
+- Foundation backend and first demo-ready flows.
+- Implements P2, P3, and P8 as full executable flows.
+- Keeps remaining 7 use cases deterministic.
+- Establishes FastAPI, PostgreSQL, LangGraph, Gemini, RAG/playbook retrieval, audit, streamable chat, and demo APIs.
+- Uses SQL/JSONB context reasoning instead of NetworkX/kglab.
+
+MVP 2: Expanded cross-domain assurance and governance
+
+- Converts more deterministic use cases into full LangGraph flows.
+- Adds L1 Monitoring Agent, L1 Closed-Loop Control Agent, and stronger audit governance behavior.
+- Adds event correlation, approval flow with LangGraph checkpoint interrupt/resume, service problem lifecycle, and richer BSS/OSS/network mock evidence.
+- Introduces NetworkX/kglab KG only after MVP 1 is stable.
+- Implements P1, P4, P5, P6, and P9 as full flows.
+
+MVP 3: Complete original scope and catalyst-grade backend
+
+- Converts all remaining use cases to full flows.
+- Implements complete layer sub-agent ecosystem.
+- Expands chat/self-service capabilities.
+- Adds stronger KG/RAG, simulation governance, and broader TMF-inspired APIs.
+- Implements P7 and P10 fully and hardens all 10 flows.
+
+
+===============================================================================
+MVP 1: Foundation and First Executable Agentic Flows
+===============================================================================
+
+MVP 1 Goal
+----------
+
+Build a working backend MVP for a telecom billing dispute agentic AI solution that demonstrates:
+
+- Billing issue listing.
+- Use case listing.
+- Customer bill explanation.
+- Cross-domain billing issue analysis.
+- Agentic remediation for selected issues.
+- Audit trace creation.
+- Owner-layer evidence gathering.
+- Basic RAG/playbook retrieval.
+- SQL/JSONB-based context reasoning.
+- Gemini-backed LLM reasoning.
+- Streamable chat for demo UX.
+
+
+MVP 1 Fully Executable Use Cases
+--------------------------------
+
+Implement these 3 use cases end-to-end with LangGraph, tools, mock evidence, action execution, and audit traces.
+
+P2. Duplicate charging / duplicate usage rating
+
+Expected outcome:
+
+- Customer duplicate charge is validated.
+- L3 returns duplicate mediation evidence.
+- L4 returns duplicate charging trigger evidence.
+- L2 applies credit/rebill correction.
+- Audit trace records decision and actions.
+
+P3. Zombie PDU session causing unfair data charging
+
+Expected outcome:
+
+- L4 confirms zombie session evidence.
+- L4 executes mock session cleanup.
+- L2 applies billing correction.
+- Audit trace records remediation chain.
+
+P8. Confusing invoice with technically valid but opaque charges
+
+Expected outcome:
+
+- L2 retrieves bill, product, usage, and previous bill context.
+- Gemini generates a clear bill explanation through a LangGraph LLM node.
+- No L1 escalation unless discrepancy is found.
+- Audit trace records explanation context.
+- Chat response is streamable through SSE.
+
+
+MVP 1 Simplified Deterministic Use Cases
+----------------------------------------
+
+The following use cases remain visible and executable as deterministic responses:
+
+- P1. Missing or delayed usage feed into billing.
+- P4. QoS or slice entitlement mismatch with premium charging.
+- P5. Service degradation requiring commercial compensation.
+- P6. Collections hold required during billing dispute.
+- P7. Partner or wholesale charge discrepancy.
+- P9. Internal anomaly discovered by monitoring before customer impact.
+- P10. Governed end-to-end dispute handling across BSS, OSS, and network teams.
+
+Each deterministic flow should:
+
+- Load issue.
+- Create or update control case.
+- Apply predefined evidence/action template.
+- Update issue status.
+- Create audit trace.
+- Return realistic response.
+
+
+MVP 1 Explicit Components
+-------------------------
+
+Implement only four explicit orchestration components:
+
+1. L1 Master Orchestration Component.
+2. L2 BSS Orchestration Component.
+3. L3 OSS Orchestration Component.
+4. L4 Network Orchestration Component.
+
+Sub-agent responsibilities are implemented as Python tools/services.
+
+Do not implement every sub-agent as an independent autonomous agent in MVP 1.
+
+
+MVP 1 LangGraph Pattern
+-----------------------
+
+Use LangGraph StateGraph for P2, P3, and P8.
+
+Required graph nodes:
+
+- load_issue
+- load_context
+- retrieve_playbook
+- gather_l2_evidence
+- gather_l3_evidence
+- gather_l4_evidence
+- summarize_evidence_llm
+- policy_decision
+- execute_owner_layer_action
+- verify_outcome
+- write_audit
+- final_response
+
+For P8 chat/bill explanation:
+
+- classify_intent
+- load_customer_context
+- load_current_bill
+- load_previous_bills
+- retrieve_bill_playbook
+- generate_explanation_llm
+- determine_escalation
+- stream_response
+- write_audit
+
+LLM usage:
+
+- Use Gemini with bound tools where useful.
+- Do not use AgentExecutor or a hidden prebuilt agent loop as the graph's internal loop.
+- Keep tool schemas shallow and strict.
+
+
+MVP 1 APIs
+----------
+
+Required APIs:
+
+- GET /api/v1/health
+- GET /api/v1/use-cases
+- GET /api/v1/issues
+- GET /api/v1/issues/{issue_id}
+- POST /api/v1/issues/{issue_id}/remediate
+- POST /api/v1/chat/stream
+- POST /api/v1/chat
+- GET /api/v1/audit-traces/{audit_trace_id}
+- GET /api/v1/control-cases/{control_case_id}
+
+Notes:
+
+- /api/v1/chat/stream is the primary demo endpoint.
+- /api/v1/chat can be retained for tests or simple clients.
+
+
+MVP 1 Streamable Chat Contract
+------------------------------
+
+Endpoint:
+
+POST /api/v1/chat/stream
+
+Transport:
+
+Server-Sent Events, SSE.
+
+Request example:
+
+{
+  "conversation_id": "CONV-001",
+  "message": "Why is my bill higher this month?",
+  "customer_id": "CUST-100001",
+  "billing_account_id": "BA-100001"
+}
+
+SSE event examples:
+
+conversation_started:
+
+{
+  "conversation_id": "CONV-001"
+}
+
+intent_detected:
+
+{
+  "intent": "bill_explanation"
+}
+
+tool_started:
+
+{
+  "tool": "get_customer_bill",
+  "summary": "Loading current bill"
+}
+
+tool_completed:
+
+{
+  "tool": "get_customer_bill",
+  "status": "success"
+}
+
+token:
+
+{
+  "text": "Your bill is higher this month because..."
+}
+
+final:
+
+{
+  "conversation_id": "CONV-001",
+  "final_response": "...",
+  "audit_trace_id": "TRACE-P8-001"
+}
+
+error:
+
+{
+  "message": "Unable to load bill context"
+}
+
+
+MVP 1 Chat Intents
+------------------
+
+Supported chat intents:
+
+1. bill_explanation
+2. compare_previous_bill
+3. issue_status
+4. remediate_issue
+5. escalate_to_human
+
+
+MVP 1 Technical Scope
+---------------------
+
+Required:
+
+- FastAPI.
+- PostgreSQL.
+- SQLAlchemy.
+- Pydantic.
+- LangGraph StateGraph.
+- langgraph-checkpoint-postgres for graph checkpointing foundation.
+- Google Vertex AI Gemini provider.
+- LangChain-compatible model/tool binding where useful.
+- No AgentExecutor or hidden prebuilt agent-loop requirement.
+- FAISS CPU or local vector store wrapper for playbook retrieval.
+- SQL joins and JSONB context reasoning instead of NetworkX/kglab.
+- Shallow, Gemini-compatible tool schemas.
+- SSE streaming for chat.
+- Dockerfile.
+- .dockerignore.
+- .env.example.
+- requirements.txt.
+- README.md.
+
+Explicitly out of MVP 1:
+
+- NetworkX/kglab KG.
+- Azure OpenAI support.
+- Full HITL approval resume flow.
+- Full TMF conformance.
+- Real ServiceNow/CRM/Billing/OSS/Network integration.
+
+
+MVP 1 Environment Configuration
+-------------------------------
+
+.env.example should include:
+
+APP_NAME=Telecom Billing Dispute Agentic AI MVP
+APP_ENV=local
+APP_DEBUG=true
+API_V1_PREFIX=/api/v1
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/billing_dispute_ai
+LANGGRAPH_CHECKPOINT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/billing_dispute_ai
+LLM_PROVIDER=vertexai_gemini
+VERTEXAI_PROJECT=
+VERTEXAI_LOCATION=
+VERTEXAI_MODEL=gemini-1.5-pro
+VERTEXAI_EMBEDDING_MODEL=
+VECTOR_STORE_PATH=data/vector_store/faiss
+PLAYBOOK_PATH=data/playbooks
+AUTO_REMEDIATION_ENABLED=true
+HUMAN_APPROVAL_CREDIT_THRESHOLD=50.00
+LOG_LEVEL=INFO
+CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost:5173
+CHAT_STREAMING_ENABLED=true
+
+
+MVP 1 Tool Schema Rules
+-----------------------
+
+All tools used by Gemini must have shallow input schemas.
+
+Example tools:
+
+get_customer_bill_tool:
+
+Input:
+
+{
+  "billing_account_id": "string",
+  "bill_id": "string | null"
+}
+
+get_previous_bills_tool:
+
+Input:
+
+{
+  "billing_account_id": "string",
+  "months": 3
+}
+
+get_issue_tool:
+
+Input:
+
+{
+  "issue_id": "string"
+}
+
+apply_adjustment_tool:
+
+Input:
+
+{
+  "issue_id": "string",
+  "billing_account_id": "string",
+  "adjustment_type": "credit|rebill|waiver",
+  "amount": 25.60,
+  "reason_code": "duplicate_charge"
+}
+
+Avoid tools that require full TMF object payloads as input.
+
+
+MVP 1 Acceptance Criteria
+-------------------------
+
+MVP 1 is complete when:
+
+- Backend starts locally.
+- PostgreSQL connection works.
+- Seed data loads successfully.
+- /api/v1/health works.
+- /api/v1/use-cases returns 10 use cases.
+- /api/v1/issues returns 10 issues.
+- P2 remediation works end-to-end.
+- P3 remediation works end-to-end.
+- P8 chat bill explanation works through /api/v1/chat/stream.
+- /api/v1/chat non-streaming works for tests if implemented.
+- Remaining 7 use cases return deterministic remediation responses.
+- Audit traces are created for remediation and chat.
+- Gemini provider is configured through Vertex AI settings.
+- LangGraph StateGraph is used for P2/P3 remediation and P8 chat/explanation flow.
+- No mandatory AgentExecutor or hidden prebuilt agent loop is used inside graph nodes.
+- Tool schemas are shallow and Gemini-compatible.
+- NetworkX/kglab is not required in MVP 1.
+- Tests pass.
+- Dockerfile and README are present.
+
+
+===============================================================================
+MVP 2: Expanded Cross-Domain Assurance, Governance, and Full Flow Coverage
+===============================================================================
+
+MVP 2 Goal
+----------
+
+Expand MVP 1 into a stronger cross-domain service assurance and revenue assurance demo.
+
+MVP 2 converts several deterministic flows into real LangGraph flows and introduces stronger governance, monitoring, service problem lifecycle, KG, and policy-controlled human approval.
+
+
+MVP 2 Main Outcomes
+-------------------
+
+By the end of MVP 2:
+
+- 8 of 10 use cases should be full executable flows.
+- L1 Monitoring Agent behavior should be implemented as a real component.
+- L1 Closed-Loop Control behavior should be implemented as a real policy/decision component.
+- L1 Audit Governance behavior should be stronger.
+- Service Problem and Trouble Ticket state handling should be richer.
+- Event DB should support correlation for proactive/pre-bill scenarios.
+- Human approval should use LangGraph checkpoint interrupt/resume.
+- NetworkX/kglab KG should be introduced.
+- More playbooks should be ingested into the vector store.
+- Chat should support more issue analysis and remediation explanation.
+
+
+MVP 2 Use Case Scope
+--------------------
+
+Full executable flows after MVP 2:
+
+Already full from MVP 1:
+
+- P2. Duplicate charging / duplicate usage rating.
+- P3. Zombie PDU session causing unfair data charging.
+- P8. Confusing invoice with technically valid but opaque charges.
+
+Convert to full LangGraph flows in MVP 2:
+
+- P1. Missing or delayed usage feed into billing.
+- P4. QoS or slice entitlement mismatch with premium charging.
+- P5. Service degradation requiring commercial compensation.
+- P6. Collections hold required during billing dispute.
+- P9. Internal anomaly discovered by monitoring before customer impact.
+
+Remain simplified until MVP 3:
+
+- P7. Partner or wholesale charge discrepancy.
+- P10. Governed end-to-end dispute handling across BSS, OSS, and network teams.
+
+
+MVP 2 New Full Flow Details
+---------------------------
+
+P1. Missing or delayed usage feed into billing
+
+MVP 2 implementation:
+
+- L4 publishes suspected usage delay event.
+- Event DB stores event.
+- L1 Monitoring component correlates event.
+- L1 Master creates control case.
+- L1 requests L3 mediation backlog/replay evidence.
+- L1 requests L2 bill-run exposure and account impact evidence.
+- L1 Closed-Loop Control decides whether replay and bill protection are allowed.
+- L3 executes mediation replay mock action.
+- L2 applies bill protection or affected charge hold.
+- Audit trace records event, evidence, decisions, and actions.
+
+P4. QoS or slice entitlement mismatch with premium charging
+
+MVP 2 implementation:
+
+- L2 identifies premium charging dispute or pre-bill exposure.
+- L1 requests L3 service QoS evidence.
+- L1 requests L4 slice/network performance evidence.
+- L2 Product & Entitlement tool validates promised commercial tier.
+- L1 evaluates delivered-vs-promised mismatch.
+- L2 removes premium surcharge or applies correction.
+- Audit trace stores entitlement, service, and network evidence.
+
+P5. Service degradation requiring commercial compensation
+
+MVP 2 implementation:
+
+- Customer/care raises Trouble Ticket.
+- L2 triages whether technical evidence is required.
+- L2 escalates to L1 only when service evidence is needed.
+- L1 requests L3 service degradation/SLA evidence.
+- L1 decision node determines compensation recommendation.
+- L2 applies compensation or creates human approval request if threshold exceeded.
+- If approval is required, LangGraph interrupts and checkpoints state.
+- Audit trace stores service evidence, compensation decision, and approval state.
+
+P6. Collections hold required during billing dispute
+
+MVP 2 implementation:
+
+- Customer raises invoice dispute.
+- L2 Trouble Ticket tool opens/updates ticket.
+- L2 Collections tool checks collections/dunning state.
+- L2 applies disputed balance hold.
+- L2 separates disputed from undisputed debt.
+- Audit trace stores policy basis and hold action.
+
+Note:
+
+- P6 normally remains L2-only.
+- L1 should not be involved unless cross-domain evidence is required.
+
+P9. Internal anomaly discovered by monitoring before customer impact
+
+MVP 2 implementation:
+
+- Origin layer publishes BillingRiskDetectedEvent.
+- L1 Monitoring component correlates event with KG/RAG patterns.
+- L1 Master creates proactive control case.
+- L1 requests focused evidence from relevant layer orchestrators.
+- L1 Closed-Loop Control decides preventive action.
+- L2/L3/L4 execute only their own actions.
+- Audit trace stores proactive prevention before customer impact.
+
+
+MVP 2 KG Introduction
+---------------------
+
+Introduce NetworkX/kglab in MVP 2 only after MVP 1 is stable.
+
+KG should be rebuilt or synchronized from PostgreSQL seed/state data using controlled scripts or service methods.
+
+Do not rely on ad-hoc in-memory graph mutations without persistence strategy.
+
+Recommended approach:
+
+- PostgreSQL remains source of truth.
+- KG is a derived read model.
+- Build/rebuild graph from DB records.
+- Store graph snapshot metadata.
+- Use KG for relationship queries and reasoning, not transactional writes.
+
+MVP 2 KG relationships:
+
+- Customer -> BillingAccount -> Bill -> BillLineItem.
+- Customer -> Product -> Offer -> Plan -> AddOn -> Promotion.
+- Product -> Service -> Resource -> NetworkFunction.
+- Service -> QoSProfile -> SliceProfile.
+- UsageEvent -> MediationRecord -> RatedUsage -> BillLineItem.
+- TroubleTicket -> ControlCase -> EvidencePack -> RemediationAction.
+- ServiceProblem -> AffectedService -> AffectedResource.
+- Event -> ControlCase -> Issue.
+
+MVP 2 KG queries should support:
+
+- Find impacted customer/account from issue.
+- Find service/resource path from billing account.
+- Find bill line item impacted by usage/session.
+- Find related trouble ticket/service problem for control case.
+- Find prior similar issue pattern.
+
+
+MVP 2 New/Expanded Components
+-----------------------------
+
+Promote the following from tools/services to explicit bounded components:
+
+L1:
+
+- Monitoring component.
+- Closed-Loop Control component.
+- Audit Governance component.
+
+L2:
+
+- Ticketing component.
+- Bill Insight component.
+- Product & Entitlement component.
+- Usage Integrity component.
+- Backoffice Adjustment component.
+- Collections & Dunning component.
+
+L3:
+
+- Service Problem component.
+- QoS / Slice Correlation component.
+- Mediation Replay component.
+
+L4:
+
+- Core Session component.
+- Charging NF Correlation component.
+- Resource RCA component.
+- Remediation Orchestrator component.
+
+Implementation note:
+
+- These may be implemented as Python classes/functions and exposed as LangGraph nodes or tools.
+- Avoid uncontrolled autonomous agent loops.
+- Each component must have clear allowed tools and forbidden actions.
+
+
+MVP 2 Event DB Enhancements
+---------------------------
+
+Add event lifecycle and correlation support.
+
+Required event types:
+
+- SuspectedUsageDelayEvent.
+- DuplicateChargingEvent.
+- ZombieSessionSuspectedEvent.
+- QoSMismatchEvent.
+- ServiceDegradationEvent.
+- CollectionsRiskEvent.
+- BillingRiskDetectedEvent.
+- MediationReplayCompletedEvent.
+- RemediationCompletedEvent.
+
+Required APIs:
+
+- POST /api/v1/events
+- GET /api/v1/events
+- GET /api/v1/events/{event_id}
+- POST /api/v1/events/simulate/{use_case_id}
+
+Correlation behavior:
+
+- MVP 2 can use deterministic correlation rules.
+- Do not require Kafka or real event streaming.
+- L1 Monitoring component can poll/read Event DB synchronously.
+
+
+MVP 2 Human Approval with LangGraph Checkpointing
+-------------------------------------------------
+
+Implement simple human approval flow using LangGraph checkpointer.
+
+Required APIs:
+
+- GET /api/v1/approvals/pending
+- GET /api/v1/approvals/{approval_id}
+- POST /api/v1/approvals/{approval_id}/approve
+- POST /api/v1/approvals/{approval_id}/reject
+- POST /api/v1/issues/{issue_id}/remediate/resume
+
+Required implementation details:
+
+- Every graph run must have a stable thread_id.
+- High-risk action node must trigger an interrupt.
+- Graph state must be saved to PostgreSQL checkpointer.
+- Approval record must store thread_id, issue_id, control_case_id, action, risk reason, and status.
+- Resume API must reload the graph using thread_id and continue execution.
+- Rejection must close or reroute the graph safely.
+
+Approval triggers:
+
+- Credit above threshold.
+- Compensation above threshold.
+- Bulk customer impact.
+- Low confidence decision.
+- Network remediation without rollback.
+- Partner settlement amount above threshold.
+
+
+MVP 2 Chat Expansion
+--------------------
+
+Keep MVP 1 intents and add:
+
+6. issue_analysis
+7. remediation_explanation
+8. collections_hold_request
+9. compensation_eligibility_check
+
+All chat interactions should support streaming through:
+
+POST /api/v1/chat/stream
+
+Chat behavior:
+
+- Care agent can ask why an issue happened.
+- Care agent can ask what evidence was used.
+- Care agent can ask whether customer is eligible for compensation.
+- Customer/care can request collections hold for disputed bill.
+- Chat can explain remediation actions already executed.
+
+Still out of scope in MVP 2:
+
+- Paper bill to eBill.
+- Appointment scheduling.
+- Full open-ended policy QA.
+- Real customer authentication.
+
+
+MVP 2 RAG and Playbook Expansion
+--------------------------------
+
+Add playbooks for:
+
+- P1 missing usage feed.
+- P4 QoS/slice mismatch.
+- P5 service degradation compensation.
+- P6 collections hold.
+- P9 proactive anomaly.
+
+Playbooks should include:
+
+- Symptoms.
+- Evidence checklist.
+- Layer ownership rules.
+- Allowed actions.
+- Approval thresholds.
+- Customer communication guidance.
+- Audit requirements.
+
+
+MVP 2 API Additions
+-------------------
+
+Add these APIs:
+
+- POST /api/v1/events
+- GET /api/v1/events
+- GET /api/v1/events/{event_id}
+- POST /api/v1/events/simulate/{use_case_id}
+- GET /api/v1/approvals/pending
+- GET /api/v1/approvals/{approval_id}
+- POST /api/v1/approvals/{approval_id}/approve
+- POST /api/v1/approvals/{approval_id}/reject
+- POST /api/v1/issues/{issue_id}/remediate/resume
+- GET /api/v1/customers/{customer_id}/billing-context
+- GET /api/v1/billing-accounts/{billing_account_id}/bill-comparison
+- GET /api/v1/control-cases/{control_case_id}/evidence
+- GET /api/v1/kg/issue/{issue_id}/relationships
+
+
+MVP 2 Database Additions
+------------------------
+
+Add or enrich tables:
+
+- approvals.
+- evidence_packs.
+- service_problems.
+- trouble_tickets.
+- mediation_jobs.
+- collections_holds.
+- compensation_decisions.
+- kg_snapshots or kg_relationships.
+
+Recommended approach:
+
+- PostgreSQL remains source of truth.
+- Continue using JSONB for flexible TMF/mock payloads.
+- Avoid full telecom schema over-normalization.
+- Add indexes for issue_id, control_case_id, customer_id, billing_account_id, event_type, and status.
+
+
+MVP 2 Testing Scope
+-------------------
+
+Required tests:
+
+- MVP 1 regression tests still pass.
+- P1 full remediation flow works.
+- P4 full remediation flow works.
+- P5 full compensation flow works.
+- P6 collections hold flow works.
+- P9 proactive anomaly flow works.
+- Event simulation creates events and control cases.
+- L1 Monitoring component correlates event to issue/control case.
+- Approval is created for high-risk action.
+- Graph state is checkpointed when approval is required.
+- Approval approve/reject endpoints work.
+- Remediation resume works from saved thread_id.
+- Chat issue_analysis streams statuses/tokens.
+- Chat remediation_explanation streams statuses/tokens.
+- Audit trace includes event, evidence, decision, approval, and action references.
+- KG relationship endpoint returns expected issue relationships.
+
+
+MVP 2 Acceptance Criteria
+-------------------------
+
+MVP 2 is complete when:
+
+- All MVP 1 acceptance criteria still pass.
+- P1, P4, P5, P6, and P9 are converted from deterministic to full executable flows.
+- 8 of 10 use cases are full_graph.
+- P7 and P10 remain simplified_deterministic.
+- Event DB APIs are available.
+- Event simulation is available.
+- L1 Monitoring can create/trigger control cases from events.
+- Human approval APIs work using LangGraph checkpoint interrupt/resume.
+- More explicit bounded components exist with clear boundaries.
+- NetworkX/kglab KG is introduced as derived read model from PostgreSQL.
+- RAG includes playbooks for at least P1, P2, P3, P4, P5, P6, P8, and P9.
+- Chat supports issue analysis and remediation explanation through SSE streaming.
+- Audit traces are richer and include evidence/action chains.
+- Tests pass.
+
+
+===============================================================================
+MVP 3: Complete Original Full Scope and Catalyst-Grade Backend
+===============================================================================
+
+MVP 3 Goal
+----------
+
+Complete the original full scope as a robust catalyst-grade backend.
+
+MVP 3 should convert all 10 use cases into full executable flows, implement the complete layer component ecosystem, deepen KG/RAG reasoning, enrich TMF-inspired API coverage, add simulation, advanced governance, and extended chat/self-service capabilities.
+
+MVP 3 remains a mock/demo backend, not a real production telecom integration.
+
+
+MVP 3 Main Outcomes
+-------------------
+
+By the end of MVP 3:
+
+- All 10 use cases are full LangGraph flows.
+- All original layer components are implemented as explicit bounded components.
+- P7 partner/wholesale discrepancy is fully implemented.
+- P10 governed end-to-end multi-team dispute handling is fully implemented.
+- Chat supports the originally intended assistant capabilities through streaming.
+- L1 Simulation component is implemented.
+- L1 Human-in-the-Loop Approval component is richer.
+- L1 Audit & Compliance component is implemented as a first-class control-plane component.
+- Event DB and Audit DB are mature enough for demo-grade traceability.
+- KG/RAG supports stronger reasoning across customer, account, bill, product, service, resource, usage, mediation, and network domains.
+- Mock data is expanded to cover realistic telecom domain context.
+
+
+MVP 3 Use Case Scope
+--------------------
+
+Convert remaining use cases to full executable flows:
+
+- P7. Partner or wholesale charge discrepancy.
+- P10. Governed end-to-end dispute handling across BSS, OSS, and network teams.
+
+Also harden and enrich all previous flows:
+
+- P1. Missing or delayed usage feed into billing.
+- P2. Duplicate charging / duplicate usage rating.
+- P3. Zombie PDU session causing unfair data charging.
+- P4. QoS or slice entitlement mismatch with premium charging.
+- P5. Service degradation requiring commercial compensation.
+- P6. Collections hold required during billing dispute.
+- P8. Confusing invoice with technically valid but opaque charges.
+- P9. Internal anomaly discovered by monitoring before customer impact.
+
+
+MVP 3 Full P7 Flow
+------------------
+
+P7. Partner or wholesale charge discrepancy
+
+Implementation:
+
+- L2 opens partner-charge/roaming Trouble Ticket.
+- L2 determines whether partner/network evidence is needed.
+- L2 escalates to L1 when cross-domain/partner evidence is needed.
+- L1 requests L4 roaming/exposure evidence.
+- L4 Roaming / Exposure component checks roaming context, PLMN/partner event anomaly, SEPP/NEF/API exposure evidence if applicable.
+- L1 requests L2 retail bill/customer impact evidence.
+- L2 Roaming & Partner Settlement component separates retail customer outcome from downstream settlement recovery.
+- L2 applies retail correction if customer was incorrectly charged.
+- L2 creates partner settlement recovery case.
+- Audit trace links customer outcome to partner recovery process.
+
+Expected outcome:
+
+- Customer issue is resolved in L2.
+- Partner settlement case is created separately.
+- L4 provides evidence but does not perform financial actions.
+- Audit trace preserves retail-to-wholesale evidence chain.
+
+
+MVP 3 Full P10 Flow
+-------------------
+
+P10. Governed end-to-end dispute handling across BSS, OSS, and network teams
+
+Implementation:
+
+- Entry layer raises cross-domain issue through event/escalation trigger.
+- L1 Monitoring component correlates and prioritizes.
+- L1 Master creates governed control case.
+- L1 requests BSS evidence/actions through L2 BSS Orchestrator.
+- L1 requests service evidence/actions through L3 OSS Orchestrator.
+- L1 requests network evidence/actions through L4 Network Orchestrator.
+- L1 Closed-Loop Control evaluates risk and policy.
+- L1 Human-in-the-Loop Approval component pauses high-risk actions using LangGraph interrupt/checkpointer.
+- Each layer executes only its own approved actions.
+- L1 Audit & Compliance component records evidence, approvals, payload traces, and outcomes.
+- Control case closes only when each domain outcome is synchronized.
+
+Expected outcome:
+
+- Multi-team dispute is governed centrally but executed locally.
+- Owner-layer boundaries are preserved.
+- Full evidence/action/approval chain is auditable.
+
+
+MVP 3 Complete Component Ecosystem
+----------------------------------
+
+Implement the original complete agent/component model as bounded components.
+
+L1 CSP Control Tower:
+
+- Layer Orchestration / Master component.
+- Billing Control Tower UI backend support APIs.
+- Monitoring component.
+- Closed-Loop Control component.
+- Party & Identity component.
+- Human-in-the-Loop Approval component.
+- Simulation component.
+- Audit & Compliance component.
+
+L2 BSS Revenue, Care & Back Office:
+
+- L2 BSS Orchestration component.
+- Ticketing component.
+- Bill Insight component.
+- Product & Entitlement component.
+- Usage Integrity component.
+- Backoffice Adjustment component.
+- Collections & Dunning component.
+- Scheduling & Follow-up component.
+- Roaming & Partner Settlement component.
+
+L3 OSS / Service Assurance & Mediation Control:
+
+- L3 OSS Orchestration component.
+- Service Problem component.
+- Service Topology component.
+- QoS / Slice Correlation component.
+- Mediation Replay component.
+- Troubleshooting component.
+
+L4 Network / Resource / Charging Trigger Layer:
+
+- L4 Network Orchestration component.
+- Resource RCA component.
+- Core Session component.
+- Charging NF Correlation component.
+- Remediation Orchestrator component.
+- Roaming / Exposure component.
+
+Rules:
+
+- Every component has a clear owner layer.
+- Every component has allowed tools.
+- Every component has forbidden tools/actions.
+- L1 never invokes other layer sub-components directly.
+- L1 communicates only with owner-layer orchestration components.
+- Sub-components do not bypass their layer orchestrator for cross-layer actions.
+- LLM tool schemas remain shallow even in MVP 3.
+
+
+MVP 3 Chat and Self-Service Expansion
+-------------------------------------
+
+Add full intended chat capabilities using streaming-first design.
+
+Existing from MVP 1/MVP 2:
+
+- bill_explanation.
+- compare_previous_bill.
+- issue_status.
+- remediate_issue.
+- escalate_to_human.
+- issue_analysis.
+- remediation_explanation.
+- collections_hold_request.
+- compensation_eligibility_check.
+
+Add in MVP 3:
+
+- schedule_callback.
+- schedule_appointment.
+- paper_bill_to_ebill.
+- dispute_creation.
+- dispute_update.
+- partner_charge_explanation.
+- roaming_charge_explanation.
+- premium_qos_charge_explanation.
+- proactive_risk_summary.
+- governed_case_summary.
+- billing_policy_qa_limited_to_playbooks.
+
+Chat guardrails:
+
+- Chat must not expose raw sensitive payloads.
+- Chat must not perform high-risk financial actions without approval.
+- Chat must not directly call L3/L4 tools from L2 customer conversation except through governed remediation flow.
+- Chat must audit intent, tools used, evidence references, and final response summary.
+- Chat must stream progress events and tokens through /api/v1/chat/stream.
+
+
+MVP 3 Simulation Component
+--------------------------
+
+Implement L1 Simulation component.
+
+Required simulation capabilities:
+
+- Inject event for each use case P1-P10.
+- Dry-run remediation without changing issue state.
+- Compare simulated action plan vs executed action plan.
+- Validate policy gating.
+- Generate synthetic evidence packs for demo scenarios.
+- Reset mock dataset to baseline.
+
+Required APIs:
+
+- POST /api/v1/simulation/use-cases/{use_case_id}/inject
+- POST /api/v1/simulation/use-cases/{use_case_id}/dry-run
+- POST /api/v1/simulation/reset
+- GET /api/v1/simulation/runs/{simulation_run_id}
+
+
+MVP 3 TMF-Inspired API Expansion
+--------------------------------
+
+Expose broader TMF-inspired mock APIs publicly or through tools.
+
+L2 APIs:
+
+- TMF621 TroubleTicket.
+- TMF678 CustomerBill.
+- TMF629 Customer.
+- TMF632 Party.
+- TMF635 ProductUsage.
+- TMF666 Account.
+- TMF646 Appointment.
+- TMF620 Product Catalog.
+- TMF637 Product Inventory.
+- TMF679 Product Offering Qualification.
+
+L3 APIs:
+
+- TMF656 ServiceProblem.
+- TMF638 ServiceInventory.
+- TMF639 ResourceInventory.
+- TMF628 Performance.
+- TMF640 ServiceActivation.
+- TMF688 Event.
+
+L4 APIs:
+
+- TMF642 Alarm.
+- TMF628 Performance.
+- TMF639 ResourceInventory.
+- TMF702 ResourceActivation.
+- TMF688 Event.
+
+Important:
+
+- These remain TMF-inspired mock APIs, not full conformance implementations.
+- Payloads should be realistic enough for catalyst demos.
+- Public endpoints can be added under /mock-tmf where useful.
+- Do not expose full deeply nested TMF payloads as LLM tool input schemas.
+
+Example route style:
+
+- GET /api/v1/mock-tmf/trouble-ticket/{ticket_id}
+- PATCH /api/v1/mock-tmf/trouble-ticket/{ticket_id}
+- GET /api/v1/mock-tmf/customer-bill/{bill_id}
+- GET /api/v1/mock-tmf/product-usage
+- GET /api/v1/mock-tmf/service-problem/{service_problem_id}
+- POST /api/v1/mock-tmf/event
+- GET /api/v1/mock-tmf/alarm
+- GET /api/v1/mock-tmf/performance
+- POST /api/v1/mock-tmf/resource-activation
+
+
+MVP 3 Knowledge Graph Completion
+--------------------------------
+
+Expand KG to cover original domain scope.
+
+PostgreSQL remains the source of truth.
+KG remains a derived reasoning/read model.
+
+KG should include:
+
+- Customer.
+- Party.
+- BillingAccount.
+- ServiceAccount.
+- CustomerBill.
+- BillLineItem.
+- Product.
+- ProductOffering.
+- Plan.
+- Bundle.
+- AddOn.
+- Promotion.
+- Device.
+- Service.
+- ServiceInventory.
+- ServiceProblem.
+- Resource.
+- ResourceInventory.
+- NetworkFunction.
+- UPF.
+- AMF.
+- SMF.
+- PCF.
+- NWDAF.
+- CTF.
+- CHF.
+- CGF.
+- CDR/xDR.
+- RawUsageEvent.
+- MediationRecord.
+- RatedUsage.
+- TroubleTicket.
+- ControlCase.
+- EvidencePack.
+- RemediationAction.
+- AuditTrace.
+
+KG queries should support:
+
+- Customer-to-bill-to-usage-to-session trace.
+- Bill line item to rated usage to mediation record trace.
+- Mediation record to raw network event trace.
+- Service to resource to network function trace.
+- Trouble ticket to service problem to control case trace.
+- Similar historical issue lookup.
+- Impacted customers/services/resources for event.
+
+
+MVP 3 RAG Completion
+--------------------
+
+Add full playbook set:
+
+- p1_missing_usage_feed.md
+- p2_duplicate_charging.md
+- p3_zombie_pdu_session.md
+- p4_qos_slice_mismatch.md
+- p5_service_degradation_compensation.md
+- p6_collections_hold.md
+- p7_partner_charge_discrepancy.md
+- p8_bill_explanation.md
+- p9_proactive_anomaly.md
+- p10_governed_dispute.md
+
+Add additional playbooks:
+
+- audit_governance_policy.md
+- human_approval_policy.md
+- customer_communication_templates.md
+- tmf_api_mock_guidelines.md
+- 5g_charging_and_mediation_context.md
+- collections_and_dunning_rules.md
+- partner_settlement_rules.md
+- qos_slice_entitlement_rules.md
+
+RAG should support:
+
+- Layer-specific retrieval.
+- Use-case-specific retrieval.
+- Policy retrieval.
+- Customer communication template retrieval.
+- Evidence checklist retrieval.
+
+
+MVP 3 Mock Data Completion
+--------------------------
+
+Expand mock data beyond MVP 1/MVP 2.
+
+Recommended scope:
+
+- 10-20 customers.
+- Multiple billing accounts.
+- B2C majority, 1-2 B2B/B2B2X examples.
+- Previous 3-6 months of bills.
+- Product plans, offers, promotions, add-ons, devices, VAS.
+- Payment details and payment history.
+- Address/contact/consent details.
+- Usage details and rated usage.
+- CDR/xDR examples.
+- Raw mediation format examples.
+- Network usage/event format examples.
+- Charging trigger examples.
+- PDU session examples.
+- UPF/SMF/AMF/PCF/NWDAF mock evidence.
+- CHF/CTF/CGF mock references.
+- Service topology and resource topology.
+- Alarms and performance metrics.
+- Trouble tickets and service problems.
+- Approval records.
+- Simulation runs.
+- Audit traces.
+
+
+MVP 3 API Additions
+-------------------
+
+Add these APIs or complete them if partially implemented:
+
+Control tower / dashboard support:
+
+- GET /api/v1/dashboard/summary
+- GET /api/v1/dashboard/prebill-risks
+- GET /api/v1/dashboard/postbill-disputes
+- GET /api/v1/dashboard/layer-health
+- GET /api/v1/dashboard/audit-summary
+
+Simulation:
+
+- POST /api/v1/simulation/use-cases/{use_case_id}/inject
+- POST /api/v1/simulation/use-cases/{use_case_id}/dry-run
+- POST /api/v1/simulation/reset
+- GET /api/v1/simulation/runs/{simulation_run_id}
+
+Appointments/self-service:
+
+- POST /api/v1/self-service/ebill
+- POST /api/v1/appointments
+- GET /api/v1/appointments/{appointment_id}
+
+Evidence and KG:
+
+- GET /api/v1/evidence-packs/{evidence_pack_id}
+- GET /api/v1/kg/issue/{issue_id}/relationships
+- GET /api/v1/kg/customer/{customer_id}/billing-context
+- GET /api/v1/kg/control-case/{control_case_id}/impact
+
+Mock TMF:
+
+- Add public mock TMF routes where useful for demo/testing.
+
+
+MVP 3 Governance and Audit Completion
+-------------------------------------
+
+Audit should capture:
+
+- Prompt summaries.
+- Tool calls.
+- Evidence references.
+- Policy decisions.
+- Human approvals.
+- Rejections.
+- Payload redaction status.
+- Remediation actions.
+- Rollback actions if any.
+- Final outcomes.
+- Customer communication summaries.
+- Streaming chat event summaries.
+
+Add audit query capabilities:
+
+- Search audit by issue_id.
+- Search audit by control_case_id.
+- Search audit by customer_id.
+- Search audit by action_type.
+- Search audit by component_id.
+- Export audit trace as JSON.
+
+APIs:
+
+- GET /api/v1/audit-traces
+- GET /api/v1/audit-traces/{audit_trace_id}
+- GET /api/v1/audit-traces/by-issue/{issue_id}
+- GET /api/v1/audit-traces/by-control-case/{control_case_id}
+- GET /api/v1/audit-traces/{audit_trace_id}/export
+
+
+MVP 3 Human Approval Completion
+-------------------------------
+
+Improve approval flow:
+
+- Pending approvals queue.
+- Approve/reject with notes.
+- Resume remediation after approval using LangGraph thread_id.
+- Store approver metadata.
+- Add approval expiry.
+- Add policy reason codes.
+- Add approval decision audit trail.
+
+Optional but useful:
+
+- Multi-level approval for very high impact actions.
+- Approval dry-run explanation.
+
+
+MVP 3 Testing Scope
+-------------------
+
+Required tests:
+
+- All MVP 1 and MVP 2 tests still pass.
+- P7 full partner discrepancy flow works.
+- P10 full governed orchestration flow works.
+- All 10 use cases are full_graph.
+- Simulation inject works for P1-P10.
+- Simulation dry-run works.
+- Chat supports schedule appointment via streaming.
+- Chat supports paper bill to eBill via streaming.
+- Chat supports dispute creation/update via streaming.
+- KG relationship APIs return expected paths.
+- RAG retrieves correct playbooks for all use cases.
+- Approval resume works from checkpointed thread_id.
+- Audit export works.
+- Mock TMF APIs return realistic payloads.
+- Gemini provider works with shallow tool schemas.
+
+
+MVP 3 Acceptance Criteria
+-------------------------
+
+MVP 3 is complete when:
+
+- All MVP 1 and MVP 2 acceptance criteria still pass.
+- All 10 use cases are full executable flows.
+- P7 and P10 are fully implemented.
+- Complete original component ecosystem is represented with bounded components.
+- L1 Simulation component is implemented.
+- L1 Audit & Compliance component is implemented as first-class component.
+- Human approval flow supports approve/reject/resume using LangGraph checkpointer.
+- Chat supports original intended capabilities including limited self-service through streaming.
+- KG supports cross-domain reasoning paths as derived read model from PostgreSQL.
+- RAG includes all use case and policy playbooks.
+- Mock data covers B2C and limited B2B/B2B2X examples.
+- TMF-inspired mock API coverage is broad enough for demo/testing.
+- Event DB and Audit DB support traceable cross-domain flows.
+- Dockerized backend runs reliably.
+- Test suite passes.
+- README includes demo scripts for all 10 use cases.
+
+
+Final Incremental Completion Map
+--------------------------------
+
+MVP 1:
+
+- Foundation.
+- Gemini-only provider.
+- Streamable chat API.
+- SQL/JSONB context reasoning.
+- P2 full.
+- P3 full.
+- P8 full.
+- Other 7 deterministic.
+- No NetworkX/kglab.
+- No AgentExecutor or hidden prebuilt agent-loop requirement.
+
+MVP 2:
+
+- P1 full.
+- P4 full.
+- P5 full.
+- P6 full.
+- P9 full.
+- Event correlation.
+- Approval APIs with LangGraph checkpoint interrupt/resume.
+- More explicit bounded components.
+- Introduce NetworkX/kglab as derived KG read model.
+- Stronger RAG.
+
+MVP 3:
+
+- P7 full.
+- P10 full.
+- All 10 full_graph.
+- Complete component ecosystem.
+- Simulation.
+- Advanced streaming chat/self-service.
+- Broader TMF-inspired mock APIs.
+- Richer KG/RAG/audit governance.
+
+
+Recommended Implementation Discipline
+-------------------------------------
+
+For every MVP:
+
+- Keep code simple and testable.
+- Do not over-engineer beyond the MVP stage.
+- Use Gemini-only provider unless future requirements change.
+- Do not use AgentExecutor or hidden prebuilt agent loops as a mandatory LangGraph node pattern.
+- Use LangGraph StateGraph to own agent loops.
+- Use bind_tools-style tool binding and explicit tool nodes where LLM tool calling is needed.
+- Keep tool schemas shallow and strictly typed.
+- Do not bypass owner-layer orchestration.
+- Do not claim functionality works unless tests pass.
+- Keep deterministic fallbacks where LLM calls are unavailable.
+- Preserve auditability for every important action.
+- Use JSONB pragmatically for complex telecom mock payloads.
+- Keep TMF APIs clearly marked as mock/TMF-inspired until real conformance work is planned.
+- Use streaming for chat demos to avoid perceived latency and UI freezes.
